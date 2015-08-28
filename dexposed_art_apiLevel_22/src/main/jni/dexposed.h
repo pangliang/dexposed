@@ -37,6 +37,7 @@
 #include <throw_location.h>
 #include <stack.h>
 #include <jni_internal.h>
+#include <class_linker.h>
 
 using art::mirror::ArtMethod;
 using art::mirror::EntryPointFromInterpreter;

@@ -45,7 +45,7 @@ typedef void (EntryPointFromInterpreter)(Thread* self, MethodHelper& mh,
 #define ART_METHOD_HAS_PADDING_FIELD_ON_64_BIT
 
 // C++ mirror of java.lang.reflect.ArtMethod.
-class MANAGED ArtMethod FINAL : public Object {
+class MANAGED ArtMethod : public Object {
  public:
   // Size of java.lang.reflect.ArtMethod.class.
   static uint32_t ClassSize();
@@ -557,27 +557,27 @@ class MANAGED ArtMethod FINAL : public Object {
         (sizeof(PtrSizedFields) / sizeof(void*)) * pointer_size;
   }
 
- protected:
+ public:
   // Field order required by test "ValidateFieldOrderOfJavaCppUnionClasses".
   // The class we are a part of.
-  HeapReference<Class> declaring_class_;
+  HeapReference<Class> declaring_class_;  //8
 
   // Short cuts to declaring_class_->dex_cache_ member for fast compiled code access.
-  HeapReference<ObjectArray<ArtMethod>> dex_cache_resolved_methods_;
+  HeapReference<ObjectArray<ArtMethod>> dex_cache_resolved_methods_;  //12
 
   // Short cuts to declaring_class_->dex_cache_ member for fast compiled code access.
-  HeapReference<ObjectArray<Class>> dex_cache_resolved_types_;
+  HeapReference<ObjectArray<Class>> dex_cache_resolved_types_; //16
 
   // Access flags; low 16 bits are defined by spec.
-  uint32_t access_flags_;
+  uint32_t access_flags_;  //20
 
   /* Dex file fields. The defining dex file is available via declaring_class_->dex_cache_ */
 
   // Offset to the CodeItem.
-  uint32_t dex_code_item_offset_;
+  uint32_t dex_code_item_offset_;   //24
 
   // Index into method_ids of the dex file associated with this method.
-  uint32_t dex_method_index_;
+  uint32_t dex_method_index_;       //28
 
   /* End of dex file fields. */
 
@@ -595,11 +595,11 @@ class MANAGED ArtMethod FINAL : public Object {
     void* entry_point_from_interpreter_;
 
     // Pointer to JNI function registered to this method, or a function to resolve the JNI function.
-    void* entry_point_from_jni_;
+    void* entry_point_from_jni_;        //40
 
     // Method dispatch from quick compiled code invokes this pointer which may cause bridging into
     // portable compiled code or the interpreter.
-    void* entry_point_from_quick_compiled_code_;
+    void* entry_point_from_quick_compiled_code_;  // 44
 
     // Method dispatch from portable compiled code invokes this pointer which may cause bridging
     // into quick compiled code or the interpreter. Last to simplify entrypoint logic.

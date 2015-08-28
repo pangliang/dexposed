@@ -20,6 +20,7 @@
 #include "scoped_thread_state_change.h"
 #include "stack.h"
 #include "well_known_classes.h"
+#include "art_method_proxy.h"
 
 namespace art {
     class ArgArray {
@@ -324,6 +325,125 @@ namespace art {
             }
             return true;
         }
+
+        bool BuildArgArrayFromObjectArray(const ScopedObjectAccessAlreadyRunnable &soa,
+                                          mirror::Object *receiver,
+                                          mirror::ObjectArray<mirror::Object> *args,
+                                          ArtMethodProxy artMethodProxy)
+        SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
+            const DexFile::TypeList *classes = artMethodProxy.GetParameterTypeList();
+            // Set receiver if non-null (method is not static)
+            if (receiver != nullptr) {
+                Append(receiver);
+            }
+            for (size_t i = 1, args_offset = 0; i < shorty_len_; ++i, ++args_offset) {
+                mirror::Object *arg = args->Get(args_offset);
+//                if (((shorty_[i] == 'L') && (arg != nullptr)) ||
+//                    ((arg == nullptr && shorty_[i] != 'L'))) {
+//                    mirror::Class *dst_class =
+//                            mh.GetClassFromTypeIdx(classes->GetTypeItem(args_offset).type_idx_);
+//                    if (UNLIKELY(arg == nullptr || !arg->InstanceOf(dst_class))) {
+//                        ThrowIllegalArgumentException(nullptr,
+//                                                      StringPrintf(
+//                                                              "method %s argument %zd has type %s, got %s",
+//                                                              PrettyMethod(artMethodProxy.GetOriginalArtMethod(),
+//                                                                           false).c_str(),
+//                                                              args_offset +
+//                                                              1,  // Humans don't count from 0.
+//                                                              PrettyDescriptor(dst_class).c_str(),
+//                                                              PrettyTypeOf(arg).c_str()).c_str());
+//                        return false;
+//                    }
+//                }
+
+#define DO_FIRST_ARG(match_descriptor, get_fn, append) { \
+          if (LIKELY(arg != nullptr && arg->GetClass<>()->DescriptorEquals(match_descriptor))) { \
+            mirror::ArtField* primitive_field = arg->GetClass()->GetIFields()->Get(0); \
+            append(primitive_field-> get_fn(arg));
+
+#define DO_ARG(match_descriptor, get_fn, append) \
+          } else if (LIKELY(arg != nullptr && \
+                            arg->GetClass<>()->DescriptorEquals(match_descriptor))) { \
+            mirror::ArtField* primitive_field = arg->GetClass()->GetIFields()->Get(0); \
+            append(primitive_field-> get_fn(arg));
+
+#define DO_FAIL(expected) \
+          } else { \
+            if (arg->GetClass<>()->IsPrimitive()) { \
+              std::string temp; \
+              ThrowIllegalPrimitiveArgumentException(expected, \
+                                                     arg->GetClass<>()->GetDescriptor(&temp)); \
+            } else { \
+              ThrowIllegalArgumentException(nullptr, \
+                  StringPrintf("method %s argument %zd has type %s, got %s", \
+                      PrettyMethod(artMethodProxy.GetOriginalArtMethod(), false).c_str(), \
+                      args_offset + 1, \
+                      expected, \
+                      PrettyTypeOf(arg).c_str()).c_str()); \
+            } \
+            return false; \
+          } }
+
+                switch (shorty_[i]) {
+                    case 'L':
+                        Append(arg);
+                        break;
+                    case 'Z': DO_FIRST_ARG("Ljava/lang/Boolean;", GetBoolean, Append)
+                    DO_FAIL("boolean")
+                        break;
+                    case 'B': DO_FIRST_ARG("Ljava/lang/Byte;", GetByte, Append)
+                    DO_FAIL("byte")
+                        break;
+                    case 'C': DO_FIRST_ARG("Ljava/lang/Character;", GetChar, Append)
+                    DO_FAIL("char")
+                        break;
+                    case 'S': DO_FIRST_ARG("Ljava/lang/Short;", GetShort, Append)
+                        DO_ARG("Ljava/lang/Byte;", GetByte, Append)
+                    DO_FAIL("short")
+                        break;
+                    case 'I': DO_FIRST_ARG("Ljava/lang/Integer;", GetInt, Append)
+                        DO_ARG("Ljava/lang/Character;", GetChar, Append)
+                        DO_ARG("Ljava/lang/Short;", GetShort, Append)
+                        DO_ARG("Ljava/lang/Byte;", GetByte, Append)
+                    DO_FAIL("int")
+                        break;
+                    case 'J': DO_FIRST_ARG("Ljava/lang/Long;", GetLong, AppendWide)
+                        DO_ARG("Ljava/lang/Integer;", GetInt, AppendWide)
+                        DO_ARG("Ljava/lang/Character;", GetChar, AppendWide)
+                        DO_ARG("Ljava/lang/Short;", GetShort, AppendWide)
+                        DO_ARG("Ljava/lang/Byte;", GetByte, AppendWide)
+                    DO_FAIL("long")
+                        break;
+                    case 'F': DO_FIRST_ARG("Ljava/lang/Float;", GetFloat, AppendFloat)
+                        DO_ARG("Ljava/lang/Long;", GetLong, AppendFloat)
+                        DO_ARG("Ljava/lang/Integer;", GetInt, AppendFloat)
+                        DO_ARG("Ljava/lang/Character;", GetChar, AppendFloat)
+                        DO_ARG("Ljava/lang/Short;", GetShort, AppendFloat)
+                        DO_ARG("Ljava/lang/Byte;", GetByte, AppendFloat)
+                    DO_FAIL("float")
+                        break;
+                    case 'D': DO_FIRST_ARG("Ljava/lang/Double;", GetDouble, AppendDouble)
+                        DO_ARG("Ljava/lang/Float;", GetFloat, AppendDouble)
+                        DO_ARG("Ljava/lang/Long;", GetLong, AppendDouble)
+                        DO_ARG("Ljava/lang/Integer;", GetInt, AppendDouble)
+                        DO_ARG("Ljava/lang/Character;", GetChar, AppendDouble)
+                        DO_ARG("Ljava/lang/Short;", GetShort, AppendDouble)
+                        DO_ARG("Ljava/lang/Byte;", GetByte, AppendDouble)
+                    DO_FAIL("double")
+                        break;
+#ifndef NDEBUG
+                        default:
+                          LOG(FATAL) << "Unexpected shorty character: " << shorty_[i];
+#endif
+                }
+#undef DO_FIRST_ARG
+#undef DO_ARG
+#undef DO_FAIL
+            }
+            return true;
+        }
+
+
 
     private:
         enum {

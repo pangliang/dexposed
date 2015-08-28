@@ -1,4 +1,4 @@
-package com.taobao.dexposed.demo;
+package com.taobao.dexposed.art;
 
 import android.app.Activity;
 import android.os.Bundle;

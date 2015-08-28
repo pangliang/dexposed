@@ -30,13 +30,26 @@
 
 #include "quick_argument_visitor.h"
 #include "ArgArray.h"
+#include "art_method_proxy.h"
 
 namespace art {
 
     jclass dexposed_class = NULL;
     jmethodID dexposed_handle_hooked_method = NULL;
 
+    int RUNNING_PLATFORM_SDK_VERSION = 0;
+
     bool dexposedOnVmCreated(JNIEnv *env, const char *) {
+
+        char sdk[PROPERTY_VALUE_MAX];
+        const char *error;
+
+        property_get("ro.build.version.sdk", sdk, "0");
+        RUNNING_PLATFORM_SDK_VERSION = atoi(sdk);
+
+        LOG(INFO) << "dexposed >>> RUNNING_PLATFORM_SDK_VERSION = " << RUNNING_PLATFORM_SDK_VERSION;
+
+        ArtMethodProxy::ShowOriginalOffset();
 
         dexposed_class = env->FindClass(DEXPOSED_CLASS);
         dexposed_class = reinterpret_cast<jclass>(env->NewGlobalRef(dexposed_class));
@@ -100,44 +113,61 @@ namespace art {
 
     JValue InvokeXposedHandleHookedMethod(ScopedObjectAccessAlreadyRunnable &soa,
                                           const char *shorty,
-                                          jobject rcvr_jobj, jmethodID method,
+                                          jobject rcvr_jobj, ArtMethod* method,
                                           std::vector<jvalue> &args)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
 
         LOG(INFO) << "dexposed: InvokeXposedHandleHookedMethod";
+
+        LOG(INFO) << "dexposed: hookInfo " << (void*)(method->GetField32<kDefaultVerifyFlags,false>(art::MemberOffset(32)));
+        LOG(INFO) << "dexposed: hookInfo " << (void*)(method->GetField32<kDefaultVerifyFlags,false>(art::MemberOffset(40)));
+        LOG(INFO) << "=========================" << Runtime::Current();
+        LOG(INFO) << "=========================" << Runtime::Current()->GetHeap();
         // Build argument array possibly triggering GC.
-        soa.Self()->AssertThreadSuspensionIsAllowable();
-        jobjectArray args_jobj = NULL;
+//        soa.Self()->AssertThreadSuspensionIsAllowable();
+        jobjectArray args_jobj = nullptr;
         const JValue zero;
+
         int32_t target_sdk_version = Runtime::Current()->GetTargetSdkVersion();
         // Do not create empty arrays unless needed to maintain Dalvik bug compatibility.
-        if (args.size() > 0 || (target_sdk_version > 0 && target_sdk_version <= 21)) {
+        if (args.size() > 0 || (target_sdk_version > 0 && target_sdk_version <= 22)) {
             args_jobj = soa.Env()->NewObjectArray(args.size(), WellKnownClasses::java_lang_Object,
-                                                  NULL);
+                                                  nullptr);
             if (args_jobj == NULL) {
                 CHECK(soa.Self()->IsExceptionPending());
                 return zero;
             }
+            mirror::ObjectArray<mirror::Object>* objectArray = soa.Decode<mirror::ObjectArray<mirror::Object> *>(args_jobj);
             for (size_t i = 0; i < args.size(); ++i) {
-                if (shorty[i + 1] == 'L') {
-                    jobject val = args.at(i).l;
-                    soa.Env()->SetObjectArrayElement(args_jobj, i, val);
-                } else {
-                    JValue jv;
-                    jv.SetJ(args.at(i).j);
-                    mirror::Object *val = BoxPrimitive(Primitive::GetType(shorty[i + 1]), jv);
-                    if (val == NULL) {
-                        CHECK(soa.Self()->IsExceptionPending());
-                        return zero;
-                    }
-                    soa.Decode<mirror::ObjectArray<mirror::Object> *>(args_jobj)->Set<false>(i,
-                                                                                             val);
+                JValue jv;
+                mirror::Object *val;
+                switch(shorty[i + 1]){
+                    case 'L':
+                        jv.SetL(soa.Decode<Object*>(args[i].l));
+                        break;
+                    case 'D':
+                        jv.SetJ(args[i].d);
+                        break;
+                    case 'J':
+                        jv.SetJ(args[i].j);
+                        break;
+                    default:
+                        jv.SetI(args[i].i);
+
                 }
+                val = BoxPrimitive(Primitive::GetType(shorty[i + 1]), jv);
+                objectArray->SetFieldObjectWithoutWriteBarrier<false, false, kVerifyNone>(objectArray->OffsetOfElement(i), val);
             }
         }
 
-        const DexposedHookInfo *hookInfo =
-                (DexposedHookInfo *) (soa.DecodeMethod(method)->GetNativeMethod());
+        LOG(INFO) << "dexposed: 55555555";
+        // soa.DecodeMethod(method)->GetNativeMethod()
+        // soa.DecodeMethod(method)->GetEntryPointFromJni()
+        ArtMethodProxy artMethodProxy(method,RUNNING_PLATFORM_SDK_VERSION);
+
+        DexposedHookInfo* hookInfo = reinterpret_cast<DexposedHookInfo*>(artMethodProxy.GetFieldPtr(ArtMethodProxy::Member::entry_point_from_jni_));
+
+        LOG(INFO) << "dexposed: hookInfo " << hookInfo << " " << (hookInfo == nullptr);
 
         // Call XposedBridge.handleHookedMethod(Member method, int originalMethodId, Object additionalInfoObj,
         //                                      Object thisObject, Object[] args)
@@ -151,7 +181,6 @@ namespace art {
                 soa.Env()->CallStaticObjectMethodA(dexposed_class,
                                                    dexposed_handle_hooked_method,
                                                    invocation_args);
-
         // Unbox the result if necessary and return it.
         if (UNLIKELY(soa.Self()->IsExceptionPending())) {
             return zero;
@@ -159,20 +188,20 @@ namespace art {
             if (shorty[0] == 'V' || (shorty[0] == 'L' && result == NULL)) {
                 return zero;
             }
-            StackHandleScope<1> hs(soa.Self());
-            MethodHelper mh_method(hs.NewHandle(soa.DecodeMethod(method)));
-            // This can cause thread suspension.
-            mirror::Object *rcvr = soa.Decode<mirror::Object *>(rcvr_jobj);
-            ThrowLocation throw_location(rcvr, mh_method.GetMethod(), -1);
-            mirror::Object *result_ref = soa.Decode<mirror::Object *>(result);
-            mirror::Class *result_type = mh_method.GetReturnType();
-            JValue result_unboxed;
-            if (!UnboxPrimitiveForResult(throw_location, result_ref, result_type,
-                                         &result_unboxed)) {
-                DCHECK(soa.Self()->IsExceptionPending());
-                return zero;
-            }
-            return result_unboxed;
+//            StackHandleScope<1> hs(soa.Self());
+//            MethodHelper mh_method(hs.NewHandle(method));
+//            // This can cause thread suspension.
+//            mirror::Object *rcvr = soa.Decode<mirror::Object *>(rcvr_jobj);
+//            ThrowLocation throw_location(rcvr, mh_method.GetMethod(), -1);
+//            mirror::Object *result_ref = soa.Decode<mirror::Object *>(result);
+//            mirror::Class *result_type = mh_method.GetReturnType();
+//            JValue result_unboxed;
+//            if (!UnboxPrimitiveForResult(throw_location, result_ref, result_type,
+//                                         &result_unboxed)) {
+//                DCHECK(soa.Self()->IsExceptionPending());
+//                return zero;
+//            }
+//            return result_unboxed;
         }
     }
 
@@ -180,66 +209,66 @@ namespace art {
     // which is responsible for recording callee save registers. We explicitly place into jobjects the
     // incoming reference arguments (so they survive GC). We invoke the invocation handler, which is a
     // field within the proxy object, which will box the primitive arguments and deal with error cases.
-    extern "C" uint64_t artQuickDexposedInvokeHandler(ArtMethod *proxy_method,
+    extern "C" uint64_t artQuickDexposedInvokeHandler(ArtMethod *art_method,
                                                       Object *receiver, Thread *self,
                                                       StackReference<ArtMethod> *sp)
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
 
-        const bool is_static = proxy_method->IsStatic();
+        const bool is_static = art_method->IsStatic();
 
-        LOG(INFO) << "dexposed: artQuickDexposedInvokeHandler is_static:" << is_static << " " << PrettyMethod(proxy_method);
+        LOG(INFO) << "dexposed: artQuickDexposedInvokeHandler is_static:" << is_static << " " << PrettyMethod(
+                art_method);
 
         // Ensure we don't get thread suspension until the object arguments are safely in jobjects.
         const char *old_cause = self->StartAssertNoThreadSuspension(
                 "Adding to IRT proxy object arguments");
 
         // Register the top of the managed stack, making stack crawlable.
-        DCHECK_EQ(sp->AsMirrorPtr(), proxy_method) << PrettyMethod(proxy_method);
+        DCHECK_EQ(sp->AsMirrorPtr(), art_method) << PrettyMethod(art_method);
         self->SetTopOfStack(sp, 0);
-//		DCHECK_EQ(proxy_method->GetFrameSizeInBytes(),
-//				Runtime::Current()->GetCalleeSaveMethod(Runtime::kRefsAndArgs)->GetFrameSizeInBytes())
-//				<< PrettyMethod(proxy_method);
-        self->VerifyStack();
+
         // Start new JNI local reference state.
-        JNIEnvExt *env = self->GetJniEnv();
-        ScopedObjectAccessUnchecked soa(env);
-        ScopedJniEnvLocalRefState env_state(env);
+        ScopedObjectAccessUnchecked soa(self);
         // Create local ref. copies of proxy method and the receiver.
         jobject rcvr_jobj = is_static ? nullptr : soa.AddLocalReference<jobject>(receiver);
 
         std::vector<jvalue> args;
+
+        ArtMethodProxy proxy(art_method,RUNNING_PLATFORM_SDK_VERSION);
         uint32_t shorty_len = 0;
-        const char *shorty = proxy_method->GetShorty(&shorty_len);
-        LOG(INFO) << "dexposed: artQuickDexposedInvokeHandler shorty:" << shorty ;
+        const char *shorty = proxy.GetShorty(&shorty_len);
+        LOG(INFO) << "dexposed: artQuickDexposedInvokeHandler " << "GetDexMethodIndex=" << proxy.GetDexMethodIndex() << " shorty=" << shorty ;
 
         BuildQuickArgumentVisitor local_ref_visitor(sp, is_static, shorty, shorty_len, &soa, &args);
         local_ref_visitor.VisitArguments();
         if (!is_static) {
-            DCHECK_GT(args.size(), 0U) << PrettyMethod(proxy_method);
+            DCHECK_GT(args.size(), 0U) << PrettyMethod(art_method);
             args.erase(args.begin());
         }
         LOG(INFO) << "dexposed: artQuickDexposedInvokeHandler args.size:" << args.size();
-        jmethodID proxy_methodid = soa.EncodeMethod(proxy_method);
+
         self->EndAssertNoThreadSuspension(old_cause);
-        JValue result = InvokeXposedHandleHookedMethod(soa, shorty, rcvr_jobj, proxy_methodid,
-                                                       args);
+        JValue result = InvokeXposedHandleHookedMethod(soa, shorty, rcvr_jobj, art_method,args);
         local_ref_visitor.FixupReferences();
         return result.GetJ();
     }
 
-
     static void com_taobao_android_dexposed_DexposedBridge_hookMethodNative(
-            JNIEnv *env, jclass, jobject java_method, jobject, jint,
+            JNIEnv *env, jclass, jobject java_method, jobject, jint jSlot,
             jobject additional_info) {
-
         ScopedObjectAccess soa(env);
-        art::Thread *self = art::Thread::Current();
 
-        jobject javaArtMethod = env->GetObjectField(java_method,
-                                                    WellKnownClasses::java_lang_reflect_AbstractMethod_artMethod);
-        ArtMethod *art_method = soa.Decode<mirror::ArtMethod *>(javaArtMethod);
+        mirror::ArtField* f =
+                soa.DecodeField(WellKnownClasses::java_lang_reflect_AbstractMethod_artMethod);
+
+        mirror::ArtMethod* method = f->GetObject(soa.Decode<mirror::Object*>(java_method))->AsArtMethod();
+
+        ArtMethod* art_method = ArtMethod::FromReflectedMethod(soa, java_method);
+        ArtMethodProxy art_method_proxy(art_method,RUNNING_PLATFORM_SDK_VERSION);
 
         LOG(INFO) << "dexposed: >>> hookMethodNative " << art_method << " " << PrettyMethod(art_method);
+        LOG(INFO) << "dexposed: >>> hookMethodNative GetDexMethodIndex=" << art_method->GetDexMethodIndex() << " GetShorty=" << art_method->GetShorty();
+        LOG(INFO) << "dexposed: >>> hookMethodNative GetDexMethodIndex=" << art_method_proxy.GetDexMethodIndex() << " GetShorty=" << art_method_proxy.GetShorty();
 
         if (dexposedIsHooked(art_method)) {
             LOG(INFO) << "dexposed: >>> Already hooked " << art_method << " " << PrettyMethod(art_method);
@@ -247,7 +276,7 @@ namespace art {
         }
 
         // Create a backup of the ArtMethod object
-        ArtMethod *backup_method = down_cast<ArtMethod *>(art_method->Clone(soa.Self()));
+        ArtMethod *backup_method = reinterpret_cast<ArtMethod *>(art_method->Clone(soa.Self()));
         // Set private flag to avoid virtual table lookups during invocation
         backup_method->SetAccessFlags(
                 backup_method->GetAccessFlags() /*| kAccXposedOriginalMethod*/);
@@ -268,16 +297,24 @@ namespace art {
         hookInfo->additionalInfo = env->NewGlobalRef(additional_info);
         hookInfo->originalMethod = backup_method;
 
-        art_method->SetFieldPtr<false, true, kDefaultVerifyFlags>(MemberOffset(32),reinterpret_cast<void *>(hookInfo));
-//        art_method->SetNativeMethod(reinterpret_cast<uint8_t *>(hookInfo));
+        // sdk_19_21: art_method->SetNativeMethod(reinterpret_cast<uint8_t *>(hookInfo));
+        // sdk_22:    art_method->SetEntryPointFromJni(reinterpret_cast<void *>(hookInfo));
+        LOG(INFO) << "dexposed: >>> hookMethodNative hookInfo=" << hookInfo;
+        art_method_proxy.SetFieldPtr(ArtMethodProxy::Member::entry_point_from_jni_, reinterpret_cast<void *>(hookInfo));
 
-        art_method->SetEntryPointFromQuickCompiledCode((void *)art_quick_dexposed_invoke_handler);
+//        art_method->SetEntryPointFromQuickCompiledCode((void *)art_quick_dexposed_invoke_handler);
+        art_method_proxy.SetFieldPtr(ArtMethodProxy::Member::entry_point_from_quick_comiled_code_,reinterpret_cast<void *>(art_quick_dexposed_invoke_handler));
+
         // Adjust access flags
-        art_method->SetAccessFlags((art_method->GetAccessFlags() & ~kAccNative) /*| kAccXposedHookedMethod*/);
+//        art_method->SetAccessFlags((art_method->GetAccessFlags() & ~kAccNative));
+//        uint32_t accessFlags = reinterpret_cast<uint32_t>(art_method_proxy.GetFieldPtr(ArtMethodProxy::Member::access_flags_));
+//        art_method_proxy.SetFieldPtr(ArtMethodProxy::Member::entry_point_from_jni_, reinterpret_cast<void *>(accessFlags & ~kAccNative));
+
     }
 
-    static bool dexposedIsHooked(ArtMethod *method) {
-        return (method->GetEntryPointFromQuickCompiledCode())
+    static bool dexposedIsHooked(ArtMethod *art_method) {
+        ArtMethodProxy art_method_proxy(art_method,RUNNING_PLATFORM_SDK_VERSION);
+        return art_method_proxy.GetFieldPtr(ArtMethodProxy::Member::entry_point_from_quick_comiled_code_)
                == (void *) art_quick_dexposed_invoke_handler;
     }
 
@@ -302,29 +339,41 @@ namespace art {
     SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
 
         ScopedObjectAccess soa(env);
-        art::Thread *self = art::Thread::Current();
-
         ArtMethod *art_method = ArtMethod::FromReflectedMethod(soa, java_method);
+
+        LOG(INFO) << "dexposed: >>> invokeOriginalMethodNative " << PrettyMethod(art_method);
+
         if(dexposedIsHooked(art_method))
         {
-            LOG(ERROR) << "dexposed: >>> invokeOriginalMethodNative dexposedIsHooked: " << PrettyMethod(art_method);
+            LOG(ERROR) << "dexposed: >>> invokeOriginalMethodNative dexposedIsHooked ";
             return nullptr;
         }
-        Object* receiver = art_method->IsStatic() ? NULL : soa.Decode<Object*>(thiz);
+
+        ArtMethodProxy proxy(art_method,RUNNING_PLATFORM_SDK_VERSION);
+
+        Object* receiver = proxy.IsStatic() ? NULL : soa.Decode<Object*>(thiz);
         StackHandleScope<1> hs(soa.Self());
-        MethodHelper mh(hs.NewHandle(art_method));
+
+
+        uint32_t shorty_len;
+        const char* shorty = proxy.GetShorty(&shorty_len);
+
+        LOG(INFO) << "dexposed: >>> invokeOriginalMethodNative shorty:" << shorty;
+
         mirror::ObjectArray<mirror::Object>* objectArray = soa.Decode<mirror::ObjectArray<mirror::Object> *>(args);
-        ArgArray arg_array(mh.GetShorty(), mh.GetShortyLength());
-        arg_array.BuildArgArrayFromObjectArray(soa,receiver,objectArray,mh);
+        ArgArray arg_array(shorty, shorty_len);
+
+        arg_array.BuildArgArrayFromObjectArray(soa,receiver,objectArray, proxy);
+
 
         JValue result ;
-        art_method->Invoke(self, arg_array.GetArray() , arg_array.GetNumBytes(), &result, mh.GetShorty());
-        if(mh.GetShorty()[0] == 'V')
+        art_method->Invoke(soa.Self(), arg_array.GetArray() , arg_array.GetNumBytes(), &result, shorty);
+        if(shorty[0] == 'V')
             return nullptr;
-        else if(mh.GetShorty()[0] == 'L')
+        else if(shorty[0] == 'L')
             return soa.AddLocalReference<jobject>(result.GetL());
         else
-            return soa.AddLocalReference<jobject>(BoxPrimitive(Primitive::GetType(mh.GetShorty()[0]), result));
+            return soa.AddLocalReference<jobject>(BoxPrimitive(Primitive::GetType(shorty[0]), result));
     }
 
     extern "C" jobject com_taobao_android_dexposed_DexposedBridge_invokeSuperNative(
@@ -336,7 +385,6 @@ namespace art {
         LOG(INFO) << "dexposed: >>> invokeSuperNative";
 
         ScopedObjectAccess soa(env);
-        art::Thread *self = art::Thread::Current();
         ArtMethod *method = ArtMethod::FromReflectedMethod(soa, java_method);
 
         // Find the actual implementation of the virtual method.
@@ -350,7 +398,7 @@ namespace art {
         arg_array.BuildArgArrayFromObjectArray(soa,receiver,objectArray,mh);
 
         JValue result ;
-        art_method->Invoke(self, arg_array.GetArray() , arg_array.GetNumBytes(), &result, mh.GetShorty());
+        art_method->Invoke(soa.Self(), arg_array.GetArray() , arg_array.GetNumBytes(), &result, mh.GetShorty());
         if(mh.GetShorty()[0] == 'V')
             return nullptr;
         else if(mh.GetShorty()[0] == 'L')

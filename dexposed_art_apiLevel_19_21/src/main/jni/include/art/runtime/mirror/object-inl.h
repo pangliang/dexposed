@@ -657,6 +657,7 @@ inline void Object::SetFieldObject(MemberOffset field_offset, Object* new_value)
   SetFieldObjectWithoutWriteBarrier<kTransactionActive, kCheckTransaction, kVerifyFlags,
       kIsVolatile>(field_offset, new_value);
   if (new_value != nullptr) {
+      LOG(INFO) << "=========================" << Runtime::Current()->GetHeap();
     Runtime::Current()->GetHeap()->WriteBarrierField(this, field_offset, new_value);
     // TODO: Check field assignment could theoretically cause thread suspension, TODO: fix this.
     CheckFieldAssignment(field_offset, new_value);
