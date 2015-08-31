@@ -57,18 +57,15 @@ namespace art {
         }
 
         void Append(uint32_t value) {
-            LOG(INFO) << "ArgArray Append " << value;
             arg_array_[num_bytes_ / 4] = value;
             num_bytes_ += 4;
         }
 
         void Append(mirror::Object *obj) SHARED_LOCKS_REQUIRED(Locks::mutator_lock_) {
-            LOG(INFO) << "ArgArray Append Object" << obj;
             Append(StackReference<mirror::Object>::FromMirrorPtr(obj).AsVRegValue());
         }
 
         void AppendWide(uint64_t value) {
-            LOG(INFO) << "ArgArray AppendWide " << value;
             // For ARM and MIPS portable, align wide values to 8 bytes (ArgArray starts at offset of 4).
 #if defined(ART_USE_PORTABLE_COMPILER) && (defined(__arm__) || defined(__mips__))
             if (num_bytes_ % 8 == 0) {
@@ -81,14 +78,12 @@ namespace art {
         }
 
         void AppendFloat(float value) {
-            LOG(INFO) << "ArgArray AppendFloat " << value;
             jvalue jv;
             jv.f = value;
             Append(jv.i);
         }
 
         void AppendDouble(double value) {
-            LOG(INFO) << "ArgArray AppendDouble " << value;
             jvalue jv;
             jv.d = value;
             AppendWide(jv.j);
