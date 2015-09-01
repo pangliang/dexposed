@@ -24,10 +24,6 @@ model{
             proguardFiles += file('proguard-rules.pro')
         }
     }
-
-    android.ndk {
-        moduleName = "dexposedbridge"
-    }
 }
 
 dependencies {

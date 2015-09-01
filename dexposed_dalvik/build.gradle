@@ -57,4 +57,3 @@ model{
 dependencies {
     compile fileTree(dir: 'libs', include: ['*.jar'])
 }
-build.dependsOn("assemble")
